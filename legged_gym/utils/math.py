@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor
 import numpy as np
-from isaacgym.torch_utils import quat_apply, normalize
+from omni.isaac.core.utils.torch_utils import quat_apply, normalize
 from typing import Tuple
 
 # @ torch.jit.script

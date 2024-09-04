@@ -1,7 +1,15 @@
 
 import sys
-from isaacgym import gymapi
-from isaacgym import gymutil
+# from isaacgym import gymapi
+# from isaacgym import gymutil
+from omni.isaac.core import SimulationContext
+from omni.isaac.core.scenes.scene import Scene
+from omni.isaac.core.utils.nucleus import get_assets_root_path
+from omni.isaac.core.utils.prims import create_prim
+from omni.isaac.core.utils.viewports import set_camera_view
+from omni.isaac.core.utils.extensions import enable_extension
+import omni.kit
+
 import numpy as np
 import torch
 
@@ -9,12 +17,13 @@ import torch
 class BaseTask():
 
     def __init__(self, cfg, sim_params, physics_engine, sim_device, headless):
-        self.gym = gymapi.acquire_gym()
-
+        self.sim_context = SimulationContext(physics_dt=1.0 / 60.0, rendering_dt=1.0 / 60.0, backend="physx",
+                                        device="cuda:0")
+        self.scene = Scene()
         self.sim_params = sim_params
         self.physics_engine = physics_engine
         self.sim_device = sim_device
-        sim_device_type, self.sim_device_id = gymutil.parse_device_str(self.sim_device)
+        sim_device_type, self.sim_device_id = parse_device_str(self.sim_device)
         self.headless = headless
 
         # env device is GPU only if sim is on GPU and use_gpu_pipeline=True, otherwise returned tensors are copied to CPU by physX.
@@ -50,25 +59,28 @@ class BaseTask():
             # self.num_privileged_obs = self.num_obs
 
         self.extras = {}
-
-        # create envs, sim and viewer
-        self.create_sim()
-        self.gym.prepare_sim(self.sim)
-
         # todo: read from config
         self.enable_viewer_sync = True
         self.viewer = None
 
         # if running with a viewer, set up keyboard shortcuts and camera
-        if self.headless == False:
-            # subscribe to keyboard shortcuts
-            self.viewer = self.gym.create_viewer(
-                self.sim, gymapi.CameraProperties())
-            self.gym.subscribe_viewer_keyboard_event(
-                self.viewer, gymapi.KEY_ESCAPE, "QUIT")
-            self.gym.subscribe_viewer_keyboard_event(
-                self.viewer, gymapi.KEY_V, "toggle_viewer_sync")
+        if not self.headless:
+            # Enable the necessary extensions for keyboard control and viewer
+            enable_extension("omni.isaac.keyboard")
 
+            # Set up the camera (example of setting camera properties)
+            set_camera_view("/OmniverseKit_Persp", position=[3, 3, 2], target=[0, 0, 0])
+            # Set up keyboard shortcuts
+            omni.kit.commands.execute("IsaacSimMenu.BindKeyEvent", key="Escape", action="Quit")
+            omni.kit.commands.execute("IsaacSimMenu.BindKeyEvent", key="V", action="Toggle Viewer Sync")
+
+
+    @staticmethod
+    def parse_device_str(device_str):
+        device = torch.device(device_str)
+        device_type = device.type
+        device_id = device.index if device.index is not None else 0
+        return device_type, device_id
     def get_observations(self):
         return self.obs_buf
     
@@ -89,27 +101,20 @@ class BaseTask():
         raise NotImplementedError
 
     def render(self, sync_frame_time=True):
-        if self.viewer:
-            # check for window closed
-            if self.gym.query_viewer_has_closed(self.viewer):
+        if not omni.kit.app.get_app().is_running():
+            sys.exit()
+
+        # Check for keyboard events
+        input_map = omni.kit.app.get_app().get_extension_manager().get_extension("omni.kit.input.map")
+        input_events = input_map.get_input_event_queue()
+        for event in input_events:
+            if event.input == "Escape" and event.value == 1.0:
                 sys.exit()
+            elif event.input == "V" and event.value == 1.0:
+                self.enable_viewer_sync = not self.enable_viewer_sync
 
-            # check for keyboard events
-            for evt in self.gym.query_viewer_action_events(self.viewer):
-                if evt.action == "QUIT" and evt.value > 0:
-                    sys.exit()
-                elif evt.action == "toggle_viewer_sync" and evt.value > 0:
-                    self.enable_viewer_sync = not self.enable_viewer_sync
+        # Step simulation and render
+        self.sim_context.step(render=self.enable_viewer_sync)
 
-            # fetch results
-            if self.device != 'cpu':
-                self.gym.fetch_results(self.sim, True)
-
-            # step graphics
-            if self.enable_viewer_sync:
-                self.gym.step_graphics(self.sim)
-                self.gym.draw_viewer(self.viewer, self.sim, True)
-                if sync_frame_time:
-                    self.gym.sync_frame_time(self.sim)
-            else:
-                self.gym.poll_viewer_events(self.viewer)
+        if sync_frame_time:
+            self.sim_context.render(sync_frame_time=True)
